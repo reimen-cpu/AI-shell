@@ -5,10 +5,13 @@
 #include "memory.h"  // Include memory manager
 #include "wrapper.h" // Include wrapper
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 #include <windows.h> // For GetModuleFileNameA and MAX_PATH
 
@@ -39,6 +42,35 @@ void clear_screen() {
 #else
   std::system("clear");
 #endif
+}
+
+bool is_ollama_ready() {
+  http::Client client("localhost", 11434);
+  http::Response resp = client.get("/");
+  return resp.status_code == 200;
+}
+
+void ensure_ollama_running() {
+  if (is_ollama_ready())
+    return;
+
+  std::cout << YELLOW << "Ollama is not running. Starting local server..."
+            << RESET << "\n";
+  std::system("start /B ollama serve > nul 2>&1");
+
+  std::cout << GRAY << "Waiting for Ollama to be ready..." << RESET;
+  for (int i = 0; i < 20; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (is_ollama_ready()) {
+      std::cout << GREEN << " Done." << RESET << "\n";
+      return;
+    }
+    std::cout << "." << std::flush;
+  }
+  std::cout
+      << RED
+      << " Failed to start Ollama automatically. Please start it manually."
+      << RESET << "\n";
 }
 
 std::string select_model() {
@@ -162,6 +194,31 @@ std::string get_exe_directory() {
   return "";
 }
 
+std::string load_system_prompt(const std::string &base_path,
+                               const std::string &env_block) {
+  std::string path = base_path + "system_prompt.txt";
+  std::ifstream f(path);
+  std::string prompt;
+  if (f.is_open()) {
+    std::string line;
+    while (std::getline(f, line)) {
+      prompt += line + "\n";
+    }
+    f.close();
+  } else {
+    // Fallback default
+    return "CTX: " + env_block + ". TASK: Output raw command.";
+  }
+
+  // Simple template replacement
+  std::string search = "{ENV_BLOCK}";
+  size_t pos = prompt.find(search);
+  if (pos != std::string::npos) {
+    prompt.replace(pos, search.length(), env_block);
+  }
+  return prompt;
+}
+
 int main(int argc, char *argv[]) {
   std::string exe_dir = get_exe_directory();
   // Enable UTF-8 Support
@@ -174,6 +231,7 @@ int main(int argc, char *argv[]) {
     args.push_back(argv[i]);
 
   if (args.empty()) {
+    ensure_ollama_running();
     setup_context(cm);
     return 0;
   }
@@ -216,6 +274,7 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
+  ensure_ollama_running();
   AiContext ctx;
   if (!cm.load_context(ctx)) {
     setup_context(cm);
@@ -223,35 +282,18 @@ int main(int argc, char *argv[]) {
   }
 
   std::string user_request = join(args, " ");
-  // Condensed System Prompt (~400 chars) for performance
-  std::string system_prompt =
-      "CTX: " + ctx.env_block +
-      ". "
-      "TASK: Output ONLY the raw executable command text. "
-      "RULES: "
-      "1. NO markdown, NO code blocks, NO explanations. "
-      "2. Chain multiple steps with && or ;. "
-      "3. Answer questions with commands (e.g. echo '...'). "
-      "4. If fixing a failure, output the FIX only, no apology. "
-      "5. Prefer SIMPLE standard commands (e.g. 'g++ --version') over complex "
-      "WMI/Registry queries. "
-      "6. Try DIFFERENT approaches if a specific command failed previously. "
-      "7. PowerShell: Output RAW command. Do NOT wrap in 'powershell -c'. "
-      "8. Windows CMD environment via std::system."
-      "9. STRICTLY FORBIDDEN on Windows: sensors, grep, awk, sed, ls. Use "
-      "PowerShell equivalents (Get-CimInstance, Select-String, Get-Content, "
-      "Get-ChildItem)."
-      "10. ALWAYS enclose file paths in double quotes (e.g. \"C:\\My "
-      "Path\\file.txt\"). Unquoted paths with spaces are forbiden.";
+  // Load External Prompt
+  std::string system_prompt = load_system_prompt(exe_dir, ctx.env_block);
 
   // MEMORY RETRIEVAL
   MemoryManager mem(exe_dir + "terminal_memory.jsonl");
   // Try to find context based on the *last* failure or just similarity to
-  // current request? User said: "Embedding of current command + error detected"
-  // Since we don't have an error *yet* for the *current* request, we only use
-  // memory if the user is asking about a previous failure (which is in
-  // transcript) OR if the current request is similar to a past known failure.
-  // For V1, let's inject any fixes relevant to the user request keywords.
+  // current request? User said: "Embedding of current command + error
+  // detected" Since we don't have an error *yet* for the *current* request,
+  // we only use memory if the user is asking about a previous failure (which
+  // is in transcript) OR if the current request is similar to a past known
+  // failure. For V1, let's inject any fixes relevant to the user request
+  // keywords.
   std::string mem_context = mem.retrieve_relevant_context(user_request, "");
 
   json::Builder chat_builder;
@@ -360,8 +402,8 @@ int main(int argc, char *argv[]) {
     // Many Windows GUI apps (explorer.exe, etc.) return non-zero exit codes
     // even when working
     if (!stderr_content.empty()) {
-      // Synthesize stderr if exit code is non-zero but stderr is empty (unusual
-      // case)
+      // Synthesize stderr if exit code is non-zero but stderr is empty
+      // (unusual case)
       if (ret != 0 && stderr_content.empty()) {
         stderr_content = "Command failed with Exit Code " +
                          std::to_string(ret) +
@@ -397,7 +439,8 @@ int main(int argc, char *argv[]) {
           "suggest installing.\" }.\n"
           "NOTE: If Exit Code is 0 and STDERR contains only progress info or "
           "warnings, set status to \"success\".\n"
-          "RULES: JSON ONLY. No markdown. Fix field MUST contain a tool name.";
+          "RULES: JSON ONLY. No markdown. Fix field MUST contain a tool "
+          "name.";
 
       distill_builder.add_message("system", "You are a system analyzer.");
       distill_builder.add_message("user", distill_prompt);

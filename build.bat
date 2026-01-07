@@ -17,6 +17,7 @@ g++ -o "%OUT_DIR%\ai.exe" ^
     "%SRC_DIR%\wrapper.cpp" ^
     "%SRC_DIR%\command_processor.cpp" ^
     "%SRC_DIR%\memory.cpp" ^
+    "%SRC_DIR%\process_runner.cpp" ^
     -lwinhttp -static-libgcc -static-libstdc++
 
 if %ERRORLEVEL% NEQ 0 (

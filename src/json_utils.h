@@ -1,43 +1,42 @@
 #ifndef JSON_UTILS_H
 #define JSON_UTILS_H
 
+#include "json.hpp" // nlohmann/json
 #include <map>
-#include <sstream>
 #include <string>
 #include <vector>
 
 
-// Very simple JSON helper to avoid external dependencies
+// Using nlohmann::json alias for convenience
+using json_t = nlohmann::json;
+
 namespace json {
 
-// Escapes a string for JSON
-std::string escape(const std::string &str);
-
-// Parses a simple JSON object (flat, no nested arrays support for now except
-// specific use cases) NOTE: This is a tailored parser for this specific tool's
-// needs.
+// Helper: Parse string to map (kept for compatibility if needed, but better to
+// use json object directly)
 std::map<std::string, std::string>
 parse_simple_object(const std::string &input);
 
-// Extracts the "content" field from Ollama's response (which is nested)
+// Extract "content" field from a standard Ollama/OpenAI chat response
 std::string extract_response_content(const std::string &json_response);
 
-// Extracts model names from /api/tags response
+// Extract model names from Ollama tags response
 std::vector<std::string> extract_model_names(const std::string &json_response);
 
+// Simple Builder Wrapper to minimize changes in main.cpp, but internally uses
+// nlohmann/json
 class Builder {
 public:
   void add(const std::string &key, const std::string &value);
   void add(const std::string &key, int value);
   void add(const std::string &key, bool value);
-  void
-  add_message(const std::string &role,
-              const std::string &content); // tailored for Ollama messages array
+  void add_message(const std::string &role, const std::string &content);
+
   std::string build() const;
 
 private:
-  std::map<std::string, std::string> simple_fields;
-  std::vector<std::pair<std::string, std::string>> messages;
+  json_t j_obj;
+  json_t j_messages = json_t::array();
 };
 
 } // namespace json

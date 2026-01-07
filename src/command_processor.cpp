@@ -1,8 +1,8 @@
 #include "command_processor.h"
+#include "process_runner.h"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
-
 
 bool is_interactive_tool(const std::string &cmd) {
   std::string lower = cmd;
@@ -92,23 +92,46 @@ int execute_command_safely(const std::string &cmd,
     if ((sanitized.length() > 60 && sanitized.find(">") == std::string::npos) ||
         sanitized.find("Comando no") != std::string::npos ||
         sanitized.find("failed") != std::string::npos) {
-      std::cerr << "\033[33m[AI Explanation suppressed to prevent execution "
-                   "error]\033[0m\n";
+      std::cerr << "\033[33m[AI Explanation suppressed]\033[0m\n";
       return 0;
     }
   }
 
   std::string final_cmd;
-
   if (is_likely_powershell(sanitized)) {
     final_cmd = wrap_powershell(sanitized);
   } else {
-    final_cmd = sanitized;
+    // For ProcessRunner via CreateProcess, we usually need "cmd /c" if it's a
+    // shell builtin or just the command if it's an exe. Since we want to
+    // support everything safely: If it's NOT powershell, we assume cmd.exe for
+    // broad compatibility (dir, type, echo, etc.)
+    final_cmd = "cmd /c " + sanitized;
   }
 
-  // Redirect stderr to file for analysis
-  std::string run_cmd = final_cmd + " 2> " + stderr_path;
-  int ret = std::system(run_cmd.c_str());
+  // Use ProcessRunner
+  ProcessRunner::Result result = ProcessRunner::run(final_cmd);
+
+  // Output Stdout live (well, buffered in this simple runner)
+  std::cout << result.stdout_output << std::flush;
+
+  // Write Stderr to file for Main's analysis (keep compatibility with main.cpp
+  // logic)
+  if (!result.stderr_output.empty()) {
+    std::cerr << result.stderr_output << std::flush;
+    // Helper: Write to file so main.cpp can read it (main expects file)
+    // Ideally main should take the string directly, but adhering to minimal
+    // refactor for now We can update main later or just write it here.
+    FILE *f = fopen(stderr_path.c_str(), "w");
+    if (f) {
+      fwrite(result.stderr_output.data(), 1, result.stderr_output.size(), f);
+      fclose(f);
+    }
+  } else {
+    // Clear file
+    FILE *f = fopen(stderr_path.c_str(), "w");
+    if (f)
+      fclose(f);
+  }
 
   // Improved clip piping: Escape quotes for CMD echo
   std::string clip_payload = sanitized;
@@ -120,7 +143,8 @@ int execute_command_safely(const std::string &cmd,
       escaped_for_echo += c;
   }
 
+  // Clip still uses system for simplicity, or we could use ProcessRunner too
   std::system(("echo \"" + escaped_for_echo + "\" | clip").c_str());
 
-  return ret;
+  return result.exit_code;
 }
