@@ -233,16 +233,58 @@ std::string load_system_prompt(const std::string &base_path,
 std::string post_process_command(const std::string &cmd) {
   std::string processed = cmd;
 
-  // Pattern: Start-Process -FilePath "C:\Program Files...\appname.exe"
-  // Convert to: $app = Get-ChildItem "C:\Program Files*" -Recurse -Filter
-  // "appname.exe" -ErrorAction SilentlyContinue | Select-Object -First 1;
-  // if($app){Start-Process $app.FullName}
+  // Only apply search pattern for Start-Process with EXPLICIT file paths
+  // Do NOT apply if:
+  // - Command contains URLs (http://, https://)
+  // - Command is just an app name without full path
 
   size_t start_pos = processed.find("Start-Process");
   if (start_pos != std::string::npos) {
+    // Skip if it's a URL
+    if (processed.find("http://") != std::string::npos ||
+        processed.find("https://") != std::string::npos) {
+      return processed;
+    }
+
+    // Skip if it's a protocol handler (e.g., "github-desktop://")
+    if (processed.find("://") != std::string::npos) {
+      return processed;
+    }
+
     size_t filepath_pos = processed.find("-FilePath", start_pos);
-    if (filepath_pos != std::string::npos) {
-      // Find the quoted path
+    if (filepath_pos == std::string::npos) {
+      // Check for direct path without -FilePath flag
+      size_t quote1 = processed.find('"', start_pos);
+      size_t quote2 = processed.find('"', quote1 + 1);
+
+      if (quote1 != std::string::npos && quote2 != std::string::npos) {
+        std::string full_path =
+            processed.substr(quote1 + 1, quote2 - quote1 - 1);
+
+        // Only convert if it's a full path with drive letter
+        if (full_path.find(":\\") != std::string::npos &&
+            full_path.find(".exe") != std::string::npos) {
+
+          // Extract just the filename
+          size_t last_slash = full_path.find_last_of("\\/");
+          if (last_slash != std::string::npos) {
+            std::string filename = full_path.substr(last_slash + 1);
+
+            // Build multi-location search command
+            std::string search_cmd =
+                "$app = Get-ChildItem \"C:\\Program "
+                "Files*\",\"C:\\Users\\*\\AppData\\Local\" -Recurse -Filter "
+                "\"" +
+                filename +
+                "\" -ErrorAction SilentlyContinue | Select-Object -First 1; "
+                "if($app){Start-Process $app.FullName}";
+
+            return search_cmd;
+          }
+        }
+      }
+    } else {
+      // Has -FilePath flag
       size_t quote1 = processed.find('"', filepath_pos);
       size_t quote2 = processed.find('"', quote1 + 1);
 
@@ -250,20 +292,26 @@ std::string post_process_command(const std::string &cmd) {
         std::string full_path =
             processed.substr(quote1 + 1, quote2 - quote1 - 1);
 
-        // Extract just the filename from the path
-        size_t last_slash = full_path.find_last_of("\\/");
-        if (last_slash != std::string::npos) {
-          std::string filename = full_path.substr(last_slash + 1);
+        // Only convert if it's a full path with drive letter
+        if (full_path.find(":\\") != std::string::npos &&
+            full_path.find(".exe") != std::string::npos) {
 
-          // Build the search-first command
-          std::string search_cmd =
-              "$app = Get-ChildItem \"C:\\Program Files*\" -Recurse -Filter "
-              "\"" +
-              filename +
-              "\" -ErrorAction SilentlyContinue | Select-Object -First 1; "
-              "if($app){Start-Process $app.FullName}";
+          // Extract just the filename
+          size_t last_slash = full_path.find_last_of("\\/");
+          if (last_slash != std::string::npos) {
+            std::string filename = full_path.substr(last_slash + 1);
 
-          return search_cmd;
+            // Build multi-location search command
+            std::string search_cmd =
+                "$app = Get-ChildItem \"C:\\Program "
+                "Files*\",\"C:\\Users\\*\\AppData\\Local\" -Recurse -Filter "
+                "\"" +
+                filename +
+                "\" -ErrorAction SilentlyContinue | Select-Object -First 1; "
+                "if($app){Start-Process $app.FullName}";
+
+            return search_cmd;
+          }
         }
       }
     }
