@@ -81,16 +81,46 @@ std::string select_environment(const std::string &model) {
                                                             // file rewrite
 }
 
+#include <windows.h>
+
+std::string get_os_string() {
+  std::string os_name = "Windows (Unknown)";
+  HKEY hKey;
+  char value[255];
+  DWORD bufferSize = 255;
+  if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                    "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0,
+                    KEY_READ, &hKey) == ERROR_SUCCESS) {
+    if (RegQueryValueExA(hKey, "ProductName", nullptr, nullptr, (LPBYTE)value,
+                         &bufferSize) == ERROR_SUCCESS) {
+      os_name = value;
+    }
+    RegCloseKey(hKey);
+  }
+  return os_name;
+}
+
+std::string get_detected_shell() {
+  if (std::getenv("PSModulePath") != nullptr) {
+    return "PowerShell (Available)";
+  }
+  return "CMD";
+}
+
 void setup_context(ContextManager &cm) {
   std::string model = select_model();
-  // Simply asking for custom or auto
   AiContext ctx;
   ctx.model_name = model;
   ctx.operating_mode = "Translator";
-  ctx.env_block = "Operating System: Windows 11\nShell: PowerShell";
+
+  std::string os = get_os_string();
+  std::string shell = get_detected_shell();
+  ctx.env_block = "Operating System: " + os + "\nShell: " + shell;
+
   ctx.transcript = "";
   cm.save_context(ctx);
-  std::cout << GREEN << "\nSetup complete!\n" << RESET;
+  std::cout << GREEN << "\nSetup complete! Detected: " << os << " / " << shell
+            << RESET << "\n";
 }
 
 void load_history_into_builder(json::Builder &builder,
@@ -134,6 +164,10 @@ std::string get_exe_directory() {
 
 int main(int argc, char *argv[]) {
   std::string exe_dir = get_exe_directory();
+  // Enable UTF-8 Support
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+
   ContextManager cm(exe_dir + "context.json");
   std::vector<std::string> args;
   for (int i = 1; i < argc; ++i)
@@ -203,7 +237,12 @@ int main(int argc, char *argv[]) {
       "WMI/Registry queries. "
       "6. Try DIFFERENT approaches if a specific command failed previously. "
       "7. PowerShell: Output RAW command. Do NOT wrap in 'powershell -c'. "
-      "8. Windows CMD environment via std::system.";
+      "8. Windows CMD environment via std::system."
+      "9. STRICTLY FORBIDDEN on Windows: sensors, grep, awk, sed, ls. Use "
+      "PowerShell equivalents (Get-CimInstance, Select-String, Get-Content, "
+      "Get-ChildItem)."
+      "10. ALWAYS enclose file paths in double quotes (e.g. \"C:\\My "
+      "Path\\file.txt\"). Unquoted paths with spaces are forbiden.";
 
   // MEMORY RETRIEVAL
   MemoryManager mem(exe_dir + "terminal_memory.jsonl");
@@ -349,13 +388,16 @@ int main(int argc, char *argv[]) {
           "STDERR: " +
           stderr_content +
           "\n"
+          "\n"
           "TASK: Output a JSON object with: { \"status\": \"success\" or "
-          "\"fail\", \"error_signature\": \"short "
-          "unique error string\", \"summary\": \"causal explanation\", "
-          "\"fix\": \"suggested fix action\" }.\n"
+          "\"fail\", \"error_signature\": \"short unique error string\", "
+          "\"summary\": \"causal explanation\", "
+          "\"fix\": \"ACTIONABLE ALTERNATIVE COMMAND. If command missing, "
+          "suggest substitute (e.g. 'Use PowerShell Select-String'). DO NOT "
+          "suggest installing.\" }.\n"
           "NOTE: If Exit Code is 0 and STDERR contains only progress info or "
           "warnings, set status to \"success\".\n"
-          "RULES: JSON ONLY. No markdown.";
+          "RULES: JSON ONLY. No markdown. Fix field MUST contain a tool name.";
 
       distill_builder.add_message("system", "You are a system analyzer.");
       distill_builder.add_message("user", distill_prompt);

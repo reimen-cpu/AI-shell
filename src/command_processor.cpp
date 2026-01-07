@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
-#include <vector>
+
 
 bool is_interactive_tool(const std::string &cmd) {
   std::string lower = cmd;
@@ -30,8 +30,7 @@ bool is_likely_powershell(const std::string &cmd) {
       cmd.find("Where-Object") != std::string::npos ||
       cmd.find("Select-String") != std::string::npos ||
       cmd.find("Write-Output") != std::string::npos ||
-      (cmd.find("|") != std::string::npos &&
-       cmd.find("grep") == std::string::npos)) {
+      cmd.find("$(") != std::string::npos) {
     return true;
   }
   return false;
@@ -90,13 +89,11 @@ int execute_command_safely(const std::string &cmd,
 
   // Filter "echo" explanations that look like failure messages
   if (sanitized.find("echo ") == 0 || sanitized.find("Write-Output ") == 0) {
-    if (sanitized.length() > 60 ||
+    if ((sanitized.length() > 60 && sanitized.find(">") == std::string::npos) ||
         sanitized.find("Comando no") != std::string::npos ||
         sanitized.find("failed") != std::string::npos) {
       std::cerr << "\033[33m[AI Explanation suppressed to prevent execution "
                    "error]\033[0m\n";
-      // Don't execute it. Return success to avoid confusing loop? Or fail?
-      // If we don't execute, we don't get the error the user hated.
       return 0;
     }
   }
