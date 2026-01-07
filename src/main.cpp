@@ -107,7 +107,8 @@ std::string select_model() {
 }
 
 std::string select_environment(const std::string &model) {
-  // ... (Keeping mostly same, simplified for brevity in this update)
+  // This function is no longer used for constructing the env_block directly.
+  // The env_block is constructed in setup_context using individual getters.
   return "Operating System: Windows 11\nShell: PowerShell"; // defaulting for
                                                             // speed in this
                                                             // file rewrite
@@ -139,6 +140,13 @@ std::string get_detected_shell() {
   return "CMD";
 }
 
+std::string get_username() {
+  const char *user = std::getenv("USERNAME");
+  if (user)
+    return std::string(user);
+  return "Unknown";
+}
+
 void setup_context(ContextManager &cm) {
   std::string model = select_model();
   AiContext ctx;
@@ -147,12 +155,14 @@ void setup_context(ContextManager &cm) {
 
   std::string os = get_os_string();
   std::string shell = get_detected_shell();
-  ctx.env_block = "Operating System: " + os + "\nShell: " + shell;
+  std::string username = get_username();
+  ctx.env_block =
+      "Operating System: " + os + "\nShell: " + shell + "\nUser: " + username;
 
   ctx.transcript = "";
   cm.save_context(ctx);
   std::cout << GREEN << "\nSetup complete! Detected: " << os << " / " << shell
-            << RESET << "\n";
+            << " / User: " << username << RESET << "\n";
 }
 
 void load_history_into_builder(json::Builder &builder,
@@ -217,6 +227,49 @@ std::string load_system_prompt(const std::string &base_path,
     prompt.replace(pos, search.length(), env_block);
   }
   return prompt;
+}
+
+// Post-process AI command to fix common issues
+std::string post_process_command(const std::string &cmd) {
+  std::string processed = cmd;
+
+  // Pattern: Start-Process -FilePath "C:\Program Files...\appname.exe"
+  // Convert to: $app = Get-ChildItem "C:\Program Files*" -Recurse -Filter
+  // "appname.exe" -ErrorAction SilentlyContinue | Select-Object -First 1;
+  // if($app){Start-Process $app.FullName}
+
+  size_t start_pos = processed.find("Start-Process");
+  if (start_pos != std::string::npos) {
+    size_t filepath_pos = processed.find("-FilePath", start_pos);
+    if (filepath_pos != std::string::npos) {
+      // Find the quoted path
+      size_t quote1 = processed.find('"', filepath_pos);
+      size_t quote2 = processed.find('"', quote1 + 1);
+
+      if (quote1 != std::string::npos && quote2 != std::string::npos) {
+        std::string full_path =
+            processed.substr(quote1 + 1, quote2 - quote1 - 1);
+
+        // Extract just the filename from the path
+        size_t last_slash = full_path.find_last_of("\\/");
+        if (last_slash != std::string::npos) {
+          std::string filename = full_path.substr(last_slash + 1);
+
+          // Build the search-first command
+          std::string search_cmd =
+              "$app = Get-ChildItem \"C:\\Program Files*\" -Recurse -Filter "
+              "\"" +
+              filename +
+              "\" -ErrorAction SilentlyContinue | Select-Object -First 1; "
+              "if($app){Start-Process $app.FullName}";
+
+          return search_cmd;
+        }
+      }
+    }
+  }
+
+  return processed;
 }
 
 int main(int argc, char *argv[]) {
@@ -348,7 +401,15 @@ int main(int argc, char *argv[]) {
   }
   std::string command = json::extract_response_content(resp.body);
 
-  // Cleanup... (omitted for brevity, assume existing)
+  // Trim whitespace
+  const char *ws = " \t\n\r\f\v";
+  command.erase(0, command.find_first_not_of(ws));
+  command.erase(command.find_last_not_of(ws) + 1);
+
+  // Post-process: Convert hardcoded Start-Process paths to search pattern
+  command = post_process_command(command);
+
+  // Cleanup markdown artifacts
   if (command.find("```") != std::string::npos) {
     command.erase(std::remove(command.begin(), command.end(), '`'),
                   command.end());

@@ -29,6 +29,7 @@ bool is_likely_powershell(const std::string &cmd) {
       cmd.find("$env:") != std::string::npos ||
       cmd.find("Where-Object") != std::string::npos ||
       cmd.find("Select-String") != std::string::npos ||
+      cmd.find("Start-Process") != std::string::npos ||
       cmd.find("Write-Output") != std::string::npos ||
       cmd.find("$(") != std::string::npos) {
     return true;
@@ -108,11 +109,19 @@ int execute_command_safely(const std::string &cmd,
     final_cmd = "cmd /c " + sanitized;
   }
 
-  // Use ProcessRunner
-  ProcessRunner::Result result = ProcessRunner::run(final_cmd);
+  // Use ProcessRunner with streaming callback
+  ProcessRunner::Result result = ProcessRunner::run(
+      final_cmd, [](const char *data, size_t len, bool is_stderr) {
+        if (is_stderr) {
+          std::cerr.write(data, len);
+          std::cerr.flush();
+        } else {
+          std::cout.write(data, len);
+          std::cout.flush();
+        }
+      });
 
-  // Output Stdout live (well, buffered in this simple runner)
-  std::cout << result.stdout_output << std::flush;
+  // Stdout already printed via callback
 
   // Write Stderr to file for Main's analysis (keep compatibility with main.cpp
   // logic)

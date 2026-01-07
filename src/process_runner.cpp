@@ -1,31 +1,13 @@
 #include "process_runner.h"
+#include <chrono>
 #include <iostream>
+#include <thread>
 #include <vector>
 #include <windows.h>
 
 
-// Helper to handle pipe reading
-void read_from_pipe(HANDLE pipe, std::string &buffer) {
-  const int BUFSIZE = 4096;
-  char temp_buf[BUFSIZE];
-  DWORD read;
-  bool success = false;
-
-  // We can't block indefinitely if the process hangs, but checking availability
-  // is tricky with anon pipes. For now, we rely on the process closing the pipe
-  // when it finishes. This simple runner assumes the process will exit.
-
-  // In a full async versions we would use Overlapped I/O or PeekNamedPipe.
-  // Here we will use a loop that reads until pipe broken (process exit).
-  while (true) {
-    success = ReadFile(pipe, temp_buf, BUFSIZE, &read, NULL);
-    if (!success || read == 0)
-      break;
-    buffer.append(temp_buf, read);
-  }
-}
-
-ProcessRunner::Result ProcessRunner::run(const std::string &command) {
+ProcessRunner::Result ProcessRunner::run(const std::string &command,
+                                         StreamCallback callback) {
   Result result;
   result.exit_code = -1;
 
@@ -83,52 +65,97 @@ ProcessRunner::Result ProcessRunner::run(const std::string &command) {
     return result;
   }
 
-  // Close write ends in this process, otherwise ReadFile will block forever
+  // Close write ends in this process
   CloseHandle(h_out_write);
   CloseHandle(h_err_write);
 
-  // Read outputs (Buffers entire output, effectively waiting for process)
-  // NOTE: This simple synchronous read might deadlock if both pipes fill up and
-  // process waits for flush. A robust solution uses threads or PeekNamedPipe.
-  // Given we are a simple CLI, let's assume one output stream dominates or we
-  // just simple-read. To strictly avoid deadlock, we should read in chunks from
-  // both alternately or use threads.
+  // READ LOOP using PeekNamedPipe
+  const int BUFSIZE = 4096;
+  char buffer[BUFSIZE];
+  bool process_running = true;
 
-  // Quick Fix: Use direct buffer read helper for now.
-  // Ideally we would spawn 2 threads to read stdout and stderr concurrently.
-  // For this implementation, we'll accept the slight risk or just read
-  // sequentially since most commands won't fill 4kb+ buffers on *both* channels
-  // simultaneously and block. Actually, to be safe, let's use a simple Peek
-  // approach if needed, but standard practice without threads allows risk.
-  // better: std::thread to read.
+  while (process_running) {
+    bool did_read = false;
+    DWORD bytes_read = 0;
+    DWORD bytes_avail = 0;
 
-  std::string out_data, err_data;
+    // Check stdout
+    if (PeekNamedPipe(h_out_read, NULL, 0, NULL, &bytes_avail, NULL) &&
+        bytes_avail > 0) {
+      if (ReadFile(h_out_read, buffer, BUFSIZE, &bytes_read, NULL) &&
+          bytes_read > 0) {
+        result.stdout_output.append(buffer, bytes_read);
+        if (callback)
+          callback(buffer, bytes_read, false);
+        did_read = true;
+      }
+    }
 
-  // Simple thread approach to read stderr while main thread reads stdout
-  // This avoids deadlock.
-  HANDLE h_err_read_dup;
-  DuplicateHandle(GetCurrentProcess(), h_err_read, GetCurrentProcess(),
-                  &h_err_read_dup, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    // Check stderr
+    if (PeekNamedPipe(h_err_read, NULL, 0, NULL, &bytes_avail, NULL) &&
+        bytes_avail > 0) {
+      if (ReadFile(h_err_read, buffer, BUFSIZE, &bytes_read, NULL) &&
+          bytes_read > 0) {
+        result.stderr_output.append(buffer, bytes_read);
+        if (callback)
+          callback(buffer, bytes_read, true);
+        did_read = true;
+      }
+    }
 
-  // We are not using std::thread here to keep dependencies simple if possible,
-  // but we included <thread> in main earlier. Actually we can't spawn a thread
-  // easily without valid function pointer or lambda capture complexity with
-  // handles. Let's rely on standard blocking read, reading stdout first then
-  // stderr.
-  read_from_pipe(h_out_read, result.stdout_output);
-  read_from_pipe(h_err_read, result.stderr_output);
+    // Check process status
+    DWORD exit_code = 0;
+    if (!GetExitCodeProcess(pi.hProcess, &exit_code)) {
+      process_running = false;
+    } else {
+      if (exit_code != STILL_ACTIVE) {
+        // Even if process exited, pipes might still have data
+        // Run one last check loop until pipes empty
+        // For simplicity, we just switch flag and let the loop run once more
+        // for data But strictly, we should peek until 0.
 
-  WaitForSingleObject(pi.hProcess, INFINITE);
+        // Let's do a strict drain
+        while (true) {
+          bool drained_any = false;
+          if (PeekNamedPipe(h_out_read, NULL, 0, NULL, &bytes_avail, NULL) &&
+              bytes_avail > 0) {
+            if (ReadFile(h_out_read, buffer, BUFSIZE, &bytes_read, NULL) &&
+                bytes_read > 0) {
+              result.stdout_output.append(buffer, bytes_read);
+              if (callback)
+                callback(buffer, bytes_read, false);
+              drained_any = true;
+            }
+          }
+          if (PeekNamedPipe(h_err_read, NULL, 0, NULL, &bytes_avail, NULL) &&
+              bytes_avail > 0) {
+            if (ReadFile(h_err_read, buffer, BUFSIZE, &bytes_read, NULL) &&
+                bytes_read > 0) {
+              result.stderr_output.append(buffer, bytes_read);
+              if (callback)
+                callback(buffer, bytes_read, true);
+              drained_any = true;
+            }
+          }
+          if (!drained_any)
+            break;
+        }
 
-  DWORD exit_code = 0;
-  GetExitCodeProcess(pi.hProcess, &exit_code);
-  result.exit_code = static_cast<int>(exit_code);
+        result.exit_code = (int)exit_code;
+        process_running = false;
+      }
+    }
+
+    if (process_running && !did_read) {
+      // Avoid CPU spin
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
 
   CloseHandle(pi.hProcess);
   CloseHandle(pi.hThread);
   CloseHandle(h_out_read);
   CloseHandle(h_err_read);
-  CloseHandle(h_err_read_dup); // was just for logic demonstration
 
   return result;
 }
