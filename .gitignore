@@ -1,0 +1,21 @@
+# Build Artifacts
+bin/
+*.exe
+*.o
+*.obj
+
+# Runtime Files
+context.json
+terminal_memory.jsonl
+terminal_stderr.log
+compile_log.txt
+
+# Editor/IDE Files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Files
+Thumbs.db
+Desktop.ini
