@@ -143,15 +143,12 @@ int main(int argc, char *argv[]) {
     setup_context(cm);
     return 0;
   }
-  if (args[0] == "--reset") {
-    cm.clear_context();
-    return 0;
-  }
-  if (args[0] == "--clear-history") {
+  if (args[0] == "--reset" || args[0] == "--clear-history") {
     AiContext ctx;
     if (cm.load_context(ctx)) {
       ctx.transcript = "";
       cm.save_context(ctx);
+      std::cout << GREEN << "History cleared." << RESET << "\n";
     }
     return 0;
   }
@@ -188,41 +185,25 @@ int main(int argc, char *argv[]) {
   AiContext ctx;
   if (!cm.load_context(ctx)) {
     setup_context(cm);
-    cm.load_context(ctx);
+    return 0; // Return after setup, don't continue execution
   }
 
   std::string user_request = join(args, " ");
+  // Condensed System Prompt (~400 chars) for performance
   std::string system_prompt =
-      "ROLE: You are a CLI expert tailored for " + ctx.env_block +
-      " environment. "
-      "TASK: Translate the USER REQUEST into a single, executable terminal "
-      "command. "
-      "EXECUTION CONTEXT: Your command runs in a Windows CMD subshell via "
-      "std::system. "
-      "IMPORTANT: If you need PowerShell commands (e.g. Get-ChildItem), output "
-      "them RAW. Do NOT wrap them in 'powershell -c'. The wrapper handles "
-      "that. "
-      "MUST wrap them: powershell -c \"...\" "
-      "RULES:\n"
-      "1. Return ONLY the command string.\n"
-      "2. NO markdown, NO code blocks (```), NO explanations.\n"
-      "3. If multiple steps are needed, combine them with && or ;.\n"
-      "4. Do NOT say 'Here is the command' or anything similar.\n"
-      "5. If the request is a question, convert it to a command that ANSWERs "
-      "it (e.g. 'echo ...').\n"
-      "6. CRITICAL: If the user asks why a command failed or asks to fix it, "
-      "do NOT 'echo' an explanation. Output the CORRECTED/WORKING command "
-      "immediately.\n"
-      "7. PREFER SIMPLE COMMANDS: Always use the simplest command that works. "
-      "For C++ version, use 'g++ --version' or 'clang++ --version' first. "
-      "AVOID complex wmic/registry queries unless explicitly needed.\n"
-      "8. If a command fails, try a completely different approach, not a "
-      "variation of the same command.\n"
-      "EXAMPLE:\n"
-      "User: 'cual es mi version de c++?' or 'what is my c++ version?'\n"
-      "Assistant: g++ --version\n"
-      "CONTEXT: " +
-      ctx.env_block;
+      "CTX: " + ctx.env_block +
+      ". "
+      "TASK: Output ONLY the raw executable command text. "
+      "RULES: "
+      "1. NO markdown, NO code blocks, NO explanations. "
+      "2. Chain multiple steps with && or ;. "
+      "3. Answer questions with commands (e.g. echo '...'). "
+      "4. If fixing a failure, output the FIX only, no apology. "
+      "5. Prefer SIMPLE standard commands (e.g. 'g++ --version') over complex "
+      "WMI/Registry queries. "
+      "6. Try DIFFERENT approaches if a specific command failed previously. "
+      "7. PowerShell: Output RAW command. Do NOT wrap in 'powershell -c'. "
+      "8. Windows CMD environment via std::system.";
 
   // MEMORY RETRIEVAL
   MemoryManager mem(exe_dir + "terminal_memory.jsonl");
@@ -336,8 +317,12 @@ int main(int argc, char *argv[]) {
       ef.close();
     }
 
-    // Heuristic: Analyze if failed OR if stderr has content
-    if (ret != 0 || !stderr_content.empty()) {
+    // Only analyze if stderr has actual content
+    // Many Windows GUI apps (explorer.exe, etc.) return non-zero exit codes
+    // even when working
+    if (!stderr_content.empty()) {
+      // Synthesize stderr if exit code is non-zero but stderr is empty (unusual
+      // case)
       if (ret != 0 && stderr_content.empty()) {
         stderr_content = "Command failed with Exit Code " +
                          std::to_string(ret) +

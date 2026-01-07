@@ -67,6 +67,36 @@ void MemoryManager::log_execution(const MemoryEntry &entry) {
   }
 }
 
+#include <set>
+
+// Helper to extract value from JSON line by key
+std::string extract_json_field(const std::string &line,
+                               const std::string &key) {
+  std::string pattern = "\"" + key + "\":\"";
+  size_t pos = line.find(pattern);
+  if (pos == std::string::npos)
+    return "";
+  size_t start = pos + pattern.length();
+  std::string res;
+  for (size_t i = start; i < line.length(); ++i) {
+    if (line[i] == '"' && line[i - 1] != '\\')
+      break;
+    if (line[i] == '\\' && i + 1 < line.length()) {
+      char next = line[i + 1];
+      if (next == '"')
+        res += '"';
+      else if (next == '\\')
+        res += '\\';
+      else
+        res += next; // simplistic unescape for others
+      i++;
+    } else {
+      res += line[i];
+    }
+  }
+  return res;
+}
+
 std::string
 MemoryManager::retrieve_relevant_context(const std::string &current_cmd,
                                          const std::string &current_error) {
@@ -74,57 +104,50 @@ MemoryManager::retrieve_relevant_context(const std::string &current_cmd,
   if (!file.is_open())
     return "";
 
+  std::vector<std::string> relevant_lines;
   std::string line;
-  std::string context_block = "";
-  int match_count = 0;
-  std::vector<std::string> matches;
 
-  // Simple fuzzy match for V1
-  // If we have a user request (current_cmd acting as user request proxy in this
-  // call from main), use it.
-
+  // Collect all lines first (to search in reverse if needed, or just scan all)
+  // For V1 simple scan is fine.
   while (std::getline(file, line)) {
-    bool meaningful_match = false;
-
-    // Check for user request overlap (simple substring)
-    // In main.cpp we pass user_request as first arg
-    if (!current_cmd.empty()) {
-      // Very basic semantic match: check for words?
-      // For now, let's just check if the stored user_req contains significant
-      // parts of current_req or vice versa. Actually, main.cpp uses this arg
-      // name "current_cmd" but passes "user_request". Let's rely on finding
-      // standard keywords.
-
-      // Match if line contains the user request (exact or substring) is too
-      // strict Let's just do: Is the current request inside the stored request
-      // or vice versa?
-      if (line.find(current_cmd) != std::string::npos) {
-        meaningful_match = true;
-      }
-    }
-
-    // Also match error signature if provided
-    if (!current_error.empty() &&
-        line.find(current_error) != std::string::npos) {
-      meaningful_match = true;
-    }
-
-    if (meaningful_match) {
-      matches.push_back(line);
-      match_count++;
-      if (match_count >= 3)
-        break;
+    if (current_cmd.empty())
+      continue;
+    // Check if line contains user request keywords (simplistic)
+    if (line.find(current_cmd) != std::string::npos) {
+      relevant_lines.push_back(line);
     }
   }
 
-  if (matches.empty())
+  if (relevant_lines.empty())
     return "";
 
-  context_block += "IMPORTANT WARNING: THE FOLLOWING COMMANDS FAILED "
-                   "PREVIOUSLY. DO NOT REPEAT THEM:\n";
-  for (const auto &m : matches) {
-    context_block += m + "\n";
+  std::string context_block = "PREVIOUS MISTAKES & FIXES:\n";
+  std::set<std::string> seen_fixes;
+  int count = 0;
+
+  // Iterate in reverse to get most recent relevant failures first
+  for (auto it = relevant_lines.rbegin(); it != relevant_lines.rend(); ++it) {
+    std::string cmd = extract_json_field(*it, "cmd");
+    std::string fix = extract_json_field(*it, "fix");
+    std::string err = extract_json_field(*it, "error_signature");
+
+    // Skip if fix is empty or "Unknown" or just repeating
+    if (fix.empty())
+      continue;
+
+    // Deduplicate based on the fix suggestion
+    if (seen_fixes.find(fix) != seen_fixes.end())
+      continue;
+    seen_fixes.insert(fix);
+
+    context_block += "- Failed: " + cmd + "\n  Fix: " + fix + "\n";
+    count++;
+    if (count >= 2)
+      break; // Limit to 2 most recent distinct relevant items
   }
+
+  if (count == 0)
+    return "";
   return context_block;
 }
 
