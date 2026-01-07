@@ -293,32 +293,35 @@ std::string post_process_command(const std::string &cmd) {
         std::string full_path =
             processed.substr(quote1 + 1, quote2 - quote1 - 1);
 
-        // Only convert if it's a full path with drive letter
-        if (full_path.find(":\\") != std::string::npos &&
-            full_path.find(".exe") != std::string::npos) {
+        // Match any .exe launch (full path or just filename)
+        if (full_path.find(".exe") != std::string::npos) {
 
           // Extract just the filename
+          std::string filename = full_path;
           size_t last_slash = full_path.find_last_of("\\/");
           if (last_slash != std::string::npos) {
-            std::string filename = full_path.substr(last_slash + 1);
-
-            // Build multi-location search command
-            std::string search_cmd =
-                "$app = Get-ChildItem \"C:\\Program "
-                "Files*\",\"C:\\Users\\*\\AppData\\Local\" -Recurse -Filter "
-                "\"" +
-                filename +
-                "\" -ErrorAction SilentlyContinue | Select-Object -First 1; "
-                "if($app){Start-Process $app.FullName}";
-
-            return search_cmd;
+            filename = full_path.substr(last_slash + 1);
           }
+
+          // Build multi-location search command with Environment Variables
+          std::string search_cmd =
+              "$app = Get-ChildItem -Path \"C:\\Program "
+              "Files\",\"C:\\Program "
+              "Files (x86)\",\"$env:LOCALAPPDATA\",\"$env:APPDATA\" -Recurse "
+              "-Filter "
+              "\"" +
+              filename +
+              "\" -ErrorAction SilentlyContinue | Select-Object -First 1; "
+              "if($app){Start-Process $app.FullName}";
+
+          return search_cmd;
         }
       }
     }
   }
+}
 
-  return processed;
+return processed;
 }
 
 // Automatic retry with AI-generated fix
@@ -347,12 +350,24 @@ std::string attempt_auto_fix(const std::string &failed_command,
       "\n\n"
       "TASK: Generate an ALTERNATIVE command that will work. "
       "Common fixes:\n"
-      "- If executable not found: use Get-ChildItem to search and "
-      "Start-Process. Example: $p=Get-ChildItem -Recurse -Filter \"Name.exe\" "
-      "...\n"
-      "- If syntax error: fix the PowerShell syntax\n"
-      "- If permission denied: suggest alternative approach\n\n"
+      "- If executable not found: use Get-ChildItem to search in explicitly "
+      "quoted paths like \"C:\\Program Files\", \"$env:LOCALAPPDATA\" and "
+      "\"$env:APPDATA\". MUST use "
+      "WILDCARDS (e.g. \"*Name*.exe\") — do NOT guess specific names like "
+      "\"App GUI.exe\".\n"
+      "- If syntax error: fix the PowerShell syntax, ensure all paths with "
+      "spaces are quoted.\n"
+      "- If permission denied: suggest alternative approach\n"
+      "- NEVER use {User} placeholders. Use $env:USERNAME or "
+      "$env:LOCALAPPDATA.\n"
+      "- CRITICAL: Do NOT simply repeat the original failed command (e.g. do "
+      "NOT output `Start-Process ... if fail ...`). "
+      "Instead, output ONLY the fix logic (e.g. `$p = Get-ChildItem ...; "
+      "Start-Process $p`). We know the first part failed, do not retry it.\n\n"
       "Output ONLY the corrected command, nothing else.";
+
+  // Debug: verify prompt content
+  std::cout << "[DEBUG] Fix Prompt:\n" << fix_prompt << "\n";
 
   fix_builder.add_message("system", system_prompt);
   fix_builder.add_message("user", fix_prompt);
@@ -371,23 +386,83 @@ std::string attempt_auto_fix(const std::string &failed_command,
   fixed_cmd.erase(0, fixed_cmd.find_first_not_of(ws));
   fixed_cmd.erase(fixed_cmd.find_last_not_of(ws) + 1);
 
-  // Power-user fix: ensure complex commands are not mangled
-  // But still remove wrapping backticks if present
-  if (fixed_cmd.size() > 1 && fixed_cmd.front() == '`' &&
-      fixed_cmd.back() == '`') {
-    fixed_cmd = fixed_cmd.substr(1, fixed_cmd.size() - 2);
+  // Cleanup markdown artifacts
+  // 1. Remove ``` code blocks
+  size_t fence_start = fixed_cmd.find("```");
+  if (fence_start != std::string::npos) {
+    // Find end of the opening line (skipping "powershell" etc)
+    size_t newline_pos = fixed_cmd.find('\n', fence_start);
+    size_t content_start =
+        (newline_pos != std::string::npos) ? newline_pos + 1 : fence_start + 3;
+
+    // Find closing fence
+    size_t fence_end = fixed_cmd.rfind("```");
+    if (fence_end != std::string::npos && fence_end > content_start) {
+      fixed_cmd = fixed_cmd.substr(content_start, fence_end - content_start);
+    } else {
+      fixed_cmd = fixed_cmd.substr(content_start);
+    }
   }
 
-  // Cleanup markdown artifacts - remove ALL backticks if they are markdown
-  // wrappers But be careful not to remove backticks inside PowerShell strings
-  // if any (though rare in basic commands) For safety, let's just remove
-  // specific markdown code blocks if present
-  if (fixed_cmd.find("```") != std::string::npos) {
-    fixed_cmd.erase(std::remove(fixed_cmd.begin(), fixed_cmd.end(), '`'),
-                    fixed_cmd.end());
+  // 2. Remove single backtick wrappers `...` ONLY if they wrap the whole string
+  // (ignoring whitespace) and aren't part of PS syntax
+  // Trim to check
+  size_t first_char = fixed_cmd.find_first_not_of(ws);
+  size_t last_char = fixed_cmd.find_last_not_of(ws);
+  if (first_char != std::string::npos && last_char != std::string::npos) {
+    if (fixed_cmd[first_char] == '`' && fixed_cmd[last_char] == '`') {
+      // Ensure it's not an escaped character like `n inside
+      // Simple heuristic: if it looks like `command`, strip them
+      fixed_cmd = fixed_cmd.substr(first_char + 1, last_char - first_char - 1);
+    }
+  }
+
+  // Trim whitespace again after cleaning
+  if (!fixed_cmd.empty()) {
+    fixed_cmd.erase(0, fixed_cmd.find_first_not_of(ws));
+    fixed_cmd.erase(fixed_cmd.find_last_not_of(ws) + 1);
   }
 
   return fixed_cmd;
+}
+
+// Optimize command for cache: if success but with stderr, extract the fallback
+std::string optimize_command_for_cache(const std::string &cmd,
+                                       const std::string &stderr_content) {
+  // If no error output, the first part likely worked (or it was silent). Keep
+  // as is.
+  if (stderr_content.empty())
+    return cmd;
+
+  // Pattern detection: "Command A; if (fail) { Command B }"
+  // Heuristic: Check for common failure checks used in our prompts.
+  size_t fallback_idx = std::string::npos;
+  if ((fallback_idx = cmd.find("if (!$?) {")) != std::string::npos ||
+      (fallback_idx = cmd.find("if ($LASTEXITCODE -ne 0) {")) !=
+          std::string::npos) {
+
+    // Check if we actually have a block
+    size_t open_brace = cmd.find('{', fallback_idx);
+    size_t last_brace = cmd.find_last_of('}');
+
+    if (open_brace != std::string::npos && last_brace != std::string::npos &&
+        last_brace > open_brace) {
+      std::string fallback =
+          cmd.substr(open_brace + 1, last_brace - open_brace - 1);
+
+      // Trim whitespace
+      const char *ws = " \t\n\r\f\v";
+      size_t first = fallback.find_first_not_of(ws);
+      size_t last = fallback.find_last_not_of(ws);
+      if (first != std::string::npos && last != std::string::npos) {
+        fallback = fallback.substr(first, last - first + 1);
+        std::cout << YELLOW << "[Cache] Saving optimized fallback command."
+                  << RESET << "\n";
+        return fallback;
+      }
+    }
+  }
+  return cmd;
 }
 
 int main(int argc, char *argv[]) {
@@ -452,9 +527,12 @@ int main(int argc, char *argv[]) {
     return 0; // Return after setup, don't continue execution
   }
 
+  std::string user_request = join(args, " ");
+
   // COMMAND CACHE CHECK
   // Use JSONL for scalability as requested
   CommandCache cache(exe_dir + "command_cache.jsonl");
+  MemoryManager mem(exe_dir + "terminal_memory.jsonl");
   // Only use cache if the command is considered reliable (success > failure)
   std::string cached_cmd = cache.get_reliable_commands(user_request);
   if (!cached_cmd.empty()) {
@@ -489,7 +567,6 @@ int main(int argc, char *argv[]) {
     std::string system_prompt = load_system_prompt(exe_dir, ctx.env_block);
 
     // MEMORY RETRIEVAL
-    MemoryManager mem(exe_dir + "terminal_memory.jsonl");
     std::string mem_context = mem.retrieve_relevant_context(user_request, "");
 
     // CACHE CONTEXT INJECTION (Similar but maybe not exact matches)
@@ -511,10 +588,14 @@ int main(int argc, char *argv[]) {
     // Inject cache context for similar successful commands
     if (!cache_context.empty()) {
       system_prompt += "\n\n" + cache_context;
-      system_prompt += "\nHINT: The above cached commands worked successfully "
-                       "for similar requests. "
-                       "Consider using a similar approach for the current "
-                       "request if applicable.";
+      system_prompt +=
+          "\nINSTRUCTION: The above cached commands are PROVEN solutions for "
+          "similar tasks. "
+          "If the user request is analogous (e.g., opening a different app), "
+          "you MUST adapt the SUCCESSFUL COMMAND PATTERN (e.g., specific "
+          "search paths, "
+          "error handling logic) to the current request. "
+          "Do not reinvent the wheel if a robust pattern exists.";
     }
 
     chat_builder.add_message("system", system_prompt);
@@ -606,10 +687,15 @@ int main(int argc, char *argv[]) {
     }
 
     // RETRY LOGIC
-    if (ret != 0 || (!stderr_content.empty() &&
-                     stderr_content.find("error") != std::string::npos)) {
+    // Trust exit code 0 as success. Stderr might contain handled errors (like
+    // in fallback patterns).
+    if (ret != 0) {
       // First attempt failed. Try auto-fix.
-      std::cout << RED << "Command failed. " << RESET << stderr_content << "\n";
+      std::cout << RED << "Command failed (Exit Code " << ret << ")." << RESET
+                << "\n";
+      if (!stderr_content.empty()) {
+        std::cout << RED << stderr_content << RESET << "\n";
+      }
 
       // Mark initial failure in cache
       cache.mark_command_failed(user_request, command, stderr_content,
@@ -649,12 +735,11 @@ int main(int argc, char *argv[]) {
         }
       }
     } else {
-      // Success on first try
-      if (!stderr_content.empty()) {
-        // Minor warnings?
-      }
+      // SUCCESS (First try)
       if (!from_cache) {
-        cache.cache_command(user_request, command, ctx.env_block);
+        std::string cmd_to_cache =
+            optimize_command_for_cache(command, stderr_content);
+        cache.cache_command(user_request, cmd_to_cache, ctx.env_block);
         std::cout << CYAN << "[Cache] Command saved." << RESET << "\n";
       } else {
         cache.increment_usage(user_request);

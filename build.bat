@@ -20,6 +20,8 @@ g++ -o "%OUT_DIR%\ai.exe" -I "%SRC_DIR%" ^
     "%SRC_DIR%\process_runner.cpp" ^
     "%SRC_DIR%\command_cache.cpp" ^
     -lwinhttp -static-libgcc -static-libstdc++
+    
+copy /Y "%~dp0system_prompt.txt" "%OUT_DIR%\" >nul 2>&1
 
 if %ERRORLEVEL% NEQ 0 (
     echo Build FAILED!

@@ -14,6 +14,8 @@ AI-Shell is an intelligent command-line assistant that bridges the gap between h
 - 🔒 **Privacy-First**: Runs 100% locally using Ollama—no cloud, no data sharing
 - 🎯 **Interactive Mode**: Special support for tools like Python REPL, SSH, MySQL
 - ⚡ **Auto-Correction**: Detects and fixes common command issues automatically
+- 💾 **Smart Cache**: Caches successful commands for instant reuse, tracking reliability
+- 🔄 **Auto-Retry**: Automatically attempts different approaches when commands fail
 
 ---
 
@@ -373,6 +375,7 @@ AI-Shell/
 │   ├── ai.exe                   # Main executable
 │   ├── context.json             # Session context (auto-generated)
 │   ├── terminal_memory.jsonl    # Learned fixes (auto-generated)
+│   ├── command_cache.jsonl      # Cached commands (auto-generated)
 │   └── system_prompt.txt        # AI instructions
 ├── src/                          # Source code
 │   ├── main.cpp                 # Entry point
