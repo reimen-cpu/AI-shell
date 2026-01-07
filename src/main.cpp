@@ -8,9 +8,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <string>
 #include <vector>
+#include <windows.h> // For GetModuleFileNameA and MAX_PATH
 
 // ANSI Color Codes
 #define RESET "\033[0m"
@@ -120,8 +120,21 @@ void load_history_into_builder(json::Builder &builder,
 
 // Helper functions moved to command_processor.cpp
 
+// Get directory where the executable is located
+std::string get_exe_directory() {
+  char path[MAX_PATH];
+  GetModuleFileNameA(NULL, path, MAX_PATH);
+  std::string full_path(path);
+  size_t last_slash = full_path.find_last_of("\\/");
+  if (last_slash != std::string::npos) {
+    return full_path.substr(0, last_slash + 1);
+  }
+  return "";
+}
+
 int main(int argc, char *argv[]) {
-  ContextManager cm("context.json");
+  std::string exe_dir = get_exe_directory();
+  ContextManager cm(exe_dir + "context.json");
   std::vector<std::string> args;
   for (int i = 1; i < argc; ++i)
     args.push_back(argv[i]);
@@ -140,6 +153,19 @@ int main(int argc, char *argv[]) {
       ctx.transcript = "";
       cm.save_context(ctx);
     }
+    return 0;
+  }
+
+  if (args[0] == "--v" || args[0] == "--version") {
+    std::cout << "AI-Shell v1.2.0 (Cpp Edition)\n";
+    return 0;
+  }
+
+  if (args[0] == "--optimize-memory") {
+    std::cout << YELLOW << "Optimizing memory..." << RESET << "\n";
+    MemoryManager mem(exe_dir + "terminal_memory.jsonl");
+    mem.optimize();
+    std::cout << GREEN << "Done." << RESET << "\n";
     return 0;
   }
 
@@ -168,7 +194,7 @@ int main(int argc, char *argv[]) {
   std::string user_request = join(args, " ");
   std::string system_prompt =
       "ROLE: You are a CLI expert tailored for " + ctx.env_block +
-      "environment. "
+      " environment. "
       "TASK: Translate the USER REQUEST into a single, executable terminal "
       "command. "
       "EXECUTION CONTEXT: Your command runs in a Windows CMD subshell via "
@@ -187,14 +213,19 @@ int main(int argc, char *argv[]) {
       "6. CRITICAL: If the user asks why a command failed or asks to fix it, "
       "do NOT 'echo' an explanation. Output the CORRECTED/WORKING command "
       "immediately.\n"
+      "7. PREFER SIMPLE COMMANDS: Always use the simplest command that works. "
+      "For C++ version, use 'g++ --version' or 'clang++ --version' first. "
+      "AVOID complex wmic/registry queries unless explicitly needed.\n"
+      "8. If a command fails, try a completely different approach, not a "
+      "variation of the same command.\n"
       "EXAMPLE:\n"
-      "User: 'Why did ping fail?'\n"
-      "Assistant: Test-NetConnection google.com\n"
+      "User: 'cual es mi version de c++?' or 'what is my c++ version?'\n"
+      "Assistant: g++ --version\n"
       "CONTEXT: " +
       ctx.env_block;
 
   // MEMORY RETRIEVAL
-  MemoryManager mem("terminal_memory.jsonl");
+  MemoryManager mem(exe_dir + "terminal_memory.jsonl");
   // Try to find context based on the *last* failure or just similarity to
   // current request? User said: "Embedding of current command + error detected"
   // Since we don't have an error *yet* for the *current* request, we only use
@@ -202,23 +233,55 @@ int main(int argc, char *argv[]) {
   // transcript) OR if the current request is similar to a past known failure.
   // For V1, let's inject any fixes relevant to the user request keywords.
   std::string mem_context = mem.retrieve_relevant_context(user_request, "");
-  if (!mem_context.empty()) {
-    system_prompt += "\n\n" + mem_context;
-  }
 
   json::Builder chat_builder;
   chat_builder.add("model", ctx.model_name);
   chat_builder.add("stream", false);
+
+  // Inject memory into system prompt for better adherence
+  if (!mem_context.empty()) {
+    system_prompt += "\n\n" + mem_context;
+    system_prompt +=
+        "\nCRITICAL: If the user request matches a past failure case above, "
+        "you MUST propose a DIFFERENT command. Do not repeat mistakes.";
+  }
+
   chat_builder.add_message("system", system_prompt);
-  load_history_into_builder(chat_builder, ctx.transcript);
+
+  // Limit transcript to last 5 exchanges (10 messages: user + assistant)
+  // to prevent slow responses from bloated context
+  std::string limited_transcript = ctx.transcript;
+  size_t count = 0;
+  size_t pos = limited_transcript.length();
+  while (pos > 0 && count < 10) {
+    pos = limited_transcript.rfind("|||", pos - 1);
+    if (pos != std::string::npos)
+      count++;
+    else
+      break;
+  }
+  if (pos != std::string::npos && pos > 0) {
+    limited_transcript = limited_transcript.substr(pos);
+  }
+
+  load_history_into_builder(chat_builder, limited_transcript);
   chat_builder.add_message("user", user_request);
 
   std::cout << GRAY << "Thinking...\r" << RESET;
+  std::flush(std::cout);
   http::Client client("localhost", 11434);
   http::Response resp = client.post("/api/chat", chat_builder.build());
 
+  // Clear "Thinking..." line
+  std::cout << "\r\033[K";
+
   if (resp.status_code != 200) {
-    std::cerr << RED << "Error.\n" << RESET;
+    std::cerr << RED << "Error: Ollama returned HTTP " << resp.status_code
+              << RESET << "\n";
+    if (!resp.body.empty()) {
+      std::cerr << GRAY << "Body: " << resp.body.substr(0, 200) << RESET
+                << "\n";
+    }
     return 1;
   }
   std::string command = json::extract_response_content(resp.body);
@@ -229,7 +292,7 @@ int main(int argc, char *argv[]) {
                   command.end());
   }
 
-  std::cout << "\r" << GREEN << "> " << command << RESET << "          \n";
+  std::cout << "\r\033[K" << GREEN << "> " << command << RESET << "\n";
   std::cout << "\nExecute? [Y/n] ";
 
   std::string ans;
@@ -260,27 +323,35 @@ int main(int argc, char *argv[]) {
     }
 
     // Use sanitized execution from module
-    // This handles finding inner command, wrapping if needed, executing, and
-    // clipping
-    int ret = execute_command_safely(command);
+    int ret = execute_command_safely(command, exe_dir + "terminal_stderr.log");
+    std::cout << GRAY << "[DEBUG] Exit Code: " << ret << RESET << "\n";
 
-    // MEMORY: Capture result and Distill if failed
+    // Read stderr file always
     std::string stderr_content = "";
-    if (ret != 0) {
-      // Read stderr file
-      std::ifstream ef("terminal_stderr.log");
-      if (ef.is_open()) {
-        std::stringstream buffer;
-        buffer << ef.rdbuf();
-        stderr_content = buffer.str();
+    std::ifstream ef(exe_dir + "terminal_stderr.log");
+    if (ef.is_open()) {
+      std::stringstream buffer;
+      buffer << ef.rdbuf();
+      stderr_content = buffer.str();
+      ef.close();
+    }
+
+    // Heuristic: Analyze if failed OR if stderr has content
+    if (ret != 0 || !stderr_content.empty()) {
+      if (ret != 0 && stderr_content.empty()) {
+        stderr_content = "Command failed with Exit Code " +
+                         std::to_string(ret) +
+                         " but produced no stderr output.";
       }
 
       // Distill: Ask AI to analyze failure
-      std::cout << YELLOW << "[Memory] Analyzing failure...\r" << RESET;
+      std::cout << YELLOW << "[Memory] Analyzing failure..." << RESET
+                << std::endl;
 
       json::Builder distill_builder;
       distill_builder.add("model", ctx.model_name);
       distill_builder.add("stream", false);
+      // Note: "format": "json" removed - causes HTTP 500 on some models
 
       std::string distill_prompt =
           "Analyze this terminal failure.\n"
@@ -293,9 +364,12 @@ int main(int argc, char *argv[]) {
           "STDERR: " +
           stderr_content +
           "\n"
-          "TASK: Output a JSON object with: { \"error_signature\": \"short "
+          "TASK: Output a JSON object with: { \"status\": \"success\" or "
+          "\"fail\", \"error_signature\": \"short "
           "unique error string\", \"summary\": \"causal explanation\", "
           "\"fix\": \"suggested fix action\" }.\n"
+          "NOTE: If Exit Code is 0 and STDERR contains only progress info or "
+          "warnings, set status to \"success\".\n"
           "RULES: JSON ONLY. No markdown.";
 
       distill_builder.add_message("system", "You are a system analyzer.");
@@ -305,43 +379,95 @@ int main(int argc, char *argv[]) {
       http::Response d_resp =
           d_client.post("/api/chat", distill_builder.build());
 
-      if (d_resp.status_code == 200) {
-        std::string analysis = json::extract_response_content(d_resp.body);
-        // Parse JSON (manual/heuristic extraction since we don't have full
-        // parser) Expecting: {"error_signature": "...", ...} For V1 simple
-        // logging, we log the raw analysis if parsing fails, or try simple
-        // string extract. Let's rely on the module to log what we have.
+      std::cout << GRAY
+                << "[DEBUG] Analysis HTTP Status: " << d_resp.status_code
+                << RESET << std::endl;
 
-        MemoryManager mem("terminal_memory.jsonl");
+      if (d_resp.status_code == 200) {
+        // Extract values directly from d_resp.body (Ollama raw JSON)
+        // Body format: {"message":{"content":"..."}, ...}
+
+        // Helper lambda to extract a JSON string value from raw body
+        auto extract_from_body = [&](const std::string &body,
+                                     const std::string &key) -> std::string {
+          std::string pattern = "\"" + key + "\":\"";
+          size_t pos = body.find(pattern);
+          if (pos == std::string::npos) {
+            // Try alternate: "key": " (with space after colon)
+            pattern = "\"" + key + "\": \"";
+            pos = body.find(pattern);
+            if (pos == std::string::npos)
+              return "";
+          }
+
+          size_t start = pos + pattern.length();
+          std::string result;
+
+          // Walk through extracting chars, handling escapes
+          for (size_t i = start; i < body.length(); ++i) {
+            char c = body[i];
+            if (c == '\\' && i + 1 < body.length()) {
+              char next = body[i + 1];
+              if (next == 'n') {
+                result += '\n';
+                i++;
+              } else if (next == '"') {
+                result += '"';
+                i++;
+              } else if (next == '\\') {
+                result += '\\';
+                i++;
+              } else if (next == 't') {
+                result += '\t';
+                i++;
+              } else if (next == 'r') {
+                result += '\r';
+                i++;
+              } else {
+                result += c;
+              }
+            } else if (c == '"') {
+              break; // End of string
+            } else {
+              result += c;
+            }
+          }
+          return result;
+        };
+
+        // First get the content field from Ollama response
+        std::string content = extract_from_body(d_resp.body, "content");
+        std::cout << GRAY << "[DEBUG] Extracted Content:\n"
+                  << content << RESET << "\n";
+
+        // Now extract the analysis fields from the content (which should be
+        // JSON)
+        std::string error_sig = extract_from_body(content, "error_signature");
+        std::string summary = extract_from_body(content, "summary");
+        std::string fix = extract_from_body(content, "fix");
+        std::string status = extract_from_body(content, "status");
+
+        std::cout << GRAY << "[DEBUG] error_signature=" << error_sig << RESET
+                  << "\n";
+
+        MemoryManager mem(exe_dir + "terminal_memory.jsonl");
         MemoryEntry entry;
+        entry.user_request = user_request;
         entry.command = command;
         entry.exit_code = ret;
         entry.status = "fail";
+        entry.error_signature = error_sig.empty() ? "Unknown Error" : error_sig;
+        entry.summary = summary;
+        entry.fix = fix;
 
-        // Basic heuristic parse
-        auto extract_val = [&](std::string key) {
-          size_t p = analysis.find("\"" + key + "\":");
-          if (p == std::string::npos)
-            return std::string("");
-          p = analysis.find("\"", p + key.length() + 3); // Start of value
-          if (p == std::string::npos)
-            return std::string("");
-          size_t end = analysis.find("\"", p + 1);
-          // Handle escaped quotes? Simplified for V1
-          return analysis.substr(p + 1, end - p - 1);
-        };
-
-        entry.error_signature = extract_val("error_signature");
-        entry.summary = extract_val("summary");
-        entry.fix = extract_val("fix");
-
-        if (entry.error_signature.empty())
-          entry.error_signature = "Unknown Error";
-
-        mem.log_execution(entry);
-        std::cout << YELLOW
-                  << "[Memory] Learned from failure: " << entry.error_signature
-                  << RESET << "\n";
+        if (status == "success") {
+          std::cout << GRAY << "[Memory] Analyzed stderr, determined harmless."
+                    << RESET << "\n";
+        } else {
+          mem.log_execution(entry);
+          std::cout << YELLOW << "[Memory] Learned from failure: "
+                    << entry.error_signature << RESET << "\n";
+        }
       }
     }
 

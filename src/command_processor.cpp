@@ -84,7 +84,8 @@ std::string sanitize_command(const std::string &raw_cmd) {
   return sanitized;
 }
 
-int execute_command_safely(const std::string &cmd) {
+int execute_command_safely(const std::string &cmd,
+                           const std::string &stderr_path) {
   std::string sanitized = sanitize_command(cmd);
 
   // Filter "echo" explanations that look like failure messages
@@ -109,7 +110,7 @@ int execute_command_safely(const std::string &cmd) {
   }
 
   // Redirect stderr to file for analysis
-  std::string run_cmd = final_cmd + " 2> terminal_stderr.log";
+  std::string run_cmd = final_cmd + " 2> " + stderr_path;
   int ret = std::system(run_cmd.c_str());
 
   // Improved clip piping: Escape quotes for CMD echo

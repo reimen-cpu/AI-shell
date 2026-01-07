@@ -19,6 +19,9 @@ Response Client::post(const std::string &path, const std::string &json_body) {
   if (!hSession)
     return response;
 
+  // Set timeout to 5 minutes (300000 ms) for LLM responses
+  WinHttpSetTimeouts(hSession, 300000, 300000, 300000, 300000);
+
   std::wstring wHost(host.begin(), host.end());
   HINTERNET hConnect = WinHttpConnect(hSession, wHost.c_str(), port, 0);
   if (!hConnect) {

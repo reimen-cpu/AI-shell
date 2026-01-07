@@ -6,7 +6,6 @@
 #include <iostream>
 #include <sstream>
 
-
 MemoryManager::MemoryManager(const std::string &filepath)
     : filepath(filepath) {}
 
@@ -48,6 +47,7 @@ void MemoryManager::log_execution(const MemoryEntry &entry) {
             << (entry.timestamp.empty() ? get_current_timestamp()
                                         : entry.timestamp)
             << "\",";
+  json_line << "\"user_req\":\"" << escape(entry.user_request) << "\",";
   json_line << "\"cmd\":\"" << escape(entry.command) << "\",";
   json_line << "\"cwd\":\"" << escape(entry.cwd) << "\",";
   json_line << "\"exit_code\":" << entry.exit_code << ",";
@@ -79,14 +79,31 @@ MemoryManager::retrieve_relevant_context(const std::string &current_cmd,
   int match_count = 0;
   std::vector<std::string> matches;
 
+  // Simple fuzzy match for V1
+  // If we have a user request (current_cmd acting as user request proxy in this
+  // call from main), use it.
+
   while (std::getline(file, line)) {
     bool meaningful_match = false;
 
-    // Basic substring match for V1
-    if (!current_cmd.empty() &&
-        line.find("\"cmd\":\"" + current_cmd) != std::string::npos) {
-      meaningful_match = true;
+    // Check for user request overlap (simple substring)
+    // In main.cpp we pass user_request as first arg
+    if (!current_cmd.empty()) {
+      // Very basic semantic match: check for words?
+      // For now, let's just check if the stored user_req contains significant
+      // parts of current_req or vice versa. Actually, main.cpp uses this arg
+      // name "current_cmd" but passes "user_request". Let's rely on finding
+      // standard keywords.
+
+      // Match if line contains the user request (exact or substring) is too
+      // strict Let's just do: Is the current request inside the stored request
+      // or vice versa?
+      if (line.find(current_cmd) != std::string::npos) {
+        meaningful_match = true;
+      }
     }
+
+    // Also match error signature if provided
     if (!current_error.empty() &&
         line.find(current_error) != std::string::npos) {
       meaningful_match = true;
@@ -103,9 +120,47 @@ MemoryManager::retrieve_relevant_context(const std::string &current_cmd,
   if (matches.empty())
     return "";
 
-  context_block += "RELEVANT PAST FIXES (from Memory):\n";
+  context_block += "IMPORTANT WARNING: THE FOLLOWING COMMANDS FAILED "
+                   "PREVIOUSLY. DO NOT REPEAT THEM:\n";
   for (const auto &m : matches) {
     context_block += m + "\n";
   }
   return context_block;
+}
+
+void MemoryManager::optimize() {
+  std::ifstream file(filepath);
+  if (!file.is_open())
+    return;
+
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(file, line)) {
+    if (!line.empty())
+      lines.push_back(line);
+  }
+  file.close();
+
+  // Simple deduplication based on exact string match (preserving latest)
+  // For V1, we just rewrite unique lines, kept in order.
+  // If we want to clean specific errors or "irrelevant", we'd need more logic.
+  // For now: Unique.
+
+  std::vector<std::string> unique_lines;
+  for (const auto &l : lines) {
+    bool duplicate = false;
+    for (const auto &u : unique_lines) {
+      if (l == u) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate)
+      unique_lines.push_back(l);
+  }
+
+  std::ofstream outfile(filepath, std::ios::trunc);
+  for (const auto &l : unique_lines) {
+    outfile << l << "\n";
+  }
 }

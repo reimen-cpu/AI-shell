@@ -4,6 +4,8 @@ setlocal
 set SRC_DIR=%~dp0src
 set OUT_DIR=%~dp0bin
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
+del /Q "%OUT_DIR%\ai.exe" 2>nul
+
 
 echo Building ai.exe...
 

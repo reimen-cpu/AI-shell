@@ -5,6 +5,7 @@
 #include <vector>
 
 struct MemoryEntry {
+  std::string user_request;
   std::string timestamp;
   std::string command;
   std::string cwd;
@@ -23,6 +24,9 @@ public:
 
   // Core function: Append a log entry
   void log_execution(const MemoryEntry &entry);
+
+  // Maintenance: Clean up duplicates and irrelevant entries
+  void optimize();
 
   // Retrieval: Find similar past errors/fixes
   // Returns a JSON-formatted string of relevant past knowledge to inject into
