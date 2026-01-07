@@ -262,26 +262,28 @@ std::string post_process_command(const std::string &cmd) {
         std::string full_path =
             processed.substr(quote1 + 1, quote2 - quote1 - 1);
 
-        // Only convert if it's a full path with drive letter
-        if (full_path.find(":\\") != std::string::npos &&
-            full_path.find(".exe") != std::string::npos) {
+        // Match any .exe launch (full path or just filename)
+        if (full_path.find(".exe") != std::string::npos) {
 
           // Extract just the filename
+          std::string filename = full_path;
           size_t last_slash = full_path.find_last_of("\\/");
           if (last_slash != std::string::npos) {
-            std::string filename = full_path.substr(last_slash + 1);
-
-            // Build multi-location search command
-            std::string search_cmd =
-                "$app = Get-ChildItem \"C:\\Program "
-                "Files*\",\"C:\\Users\\*\\AppData\\Local\" -Recurse -Filter "
-                "\"" +
-                filename +
-                "\" -ErrorAction SilentlyContinue | Select-Object -First 1; "
-                "if($app){Start-Process $app.FullName}";
-
-            return search_cmd;
+            filename = full_path.substr(last_slash + 1);
           }
+
+          // Build multi-location search command with Environment Variables
+          std::string search_cmd =
+              "$app = Get-ChildItem -Path \"C:\\Program "
+              "Files\",\"C:\\Program "
+              "Files (x86)\",\"$env:LOCALAPPDATA\",\"$env:APPDATA\" -Recurse "
+              "-Filter "
+              "\"" +
+              filename +
+              "\" -ErrorAction SilentlyContinue | Select-Object -First 1; "
+              "if($app){Start-Process $app.FullName}";
+
+          return search_cmd;
         }
       }
     } else {
@@ -319,9 +321,8 @@ std::string post_process_command(const std::string &cmd) {
       }
     }
   }
-}
 
-return processed;
+  return processed;
 }
 
 // Automatic retry with AI-generated fix
@@ -367,7 +368,7 @@ std::string attempt_auto_fix(const std::string &failed_command,
       "Output ONLY the corrected command, nothing else.";
 
   // Debug: verify prompt content
-  std::cout << "[DEBUG] Fix Prompt:\n" << fix_prompt << "\n";
+  // std::cout << "[DEBUG] Fix Prompt:\n" << fix_prompt << "\n";
 
   fix_builder.add_message("system", system_prompt);
   fix_builder.add_message("user", fix_prompt);
