@@ -9,7 +9,7 @@ del /Q "%OUT_DIR%\ai.exe" 2>nul
 
 echo Building ai.exe...
 
-g++ -o "%OUT_DIR%\ai.exe" ^
+g++ -o "%OUT_DIR%\ai.exe" -I "%SRC_DIR%" ^
     "%SRC_DIR%\main.cpp" ^
     "%SRC_DIR%\json_utils.cpp" ^
     "%SRC_DIR%\http_client.cpp" ^
@@ -18,6 +18,7 @@ g++ -o "%OUT_DIR%\ai.exe" ^
     "%SRC_DIR%\command_processor.cpp" ^
     "%SRC_DIR%\memory.cpp" ^
     "%SRC_DIR%\process_runner.cpp" ^
+    "%SRC_DIR%\command_cache.cpp" ^
     -lwinhttp -static-libgcc -static-libstdc++
 
 if %ERRORLEVEL% NEQ 0 (
